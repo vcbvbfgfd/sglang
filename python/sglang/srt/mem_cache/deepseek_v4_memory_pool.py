@@ -387,7 +387,8 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         page_size: int,
         swa_page_size: int,
         dtype: torch.dtype,
-        state_dtype: torch.dtype,
+        c4_state_dtype: torch.dtype,
+        c128_state_dtype: torch.dtype,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         indexer_head_dim: int,
@@ -424,7 +425,8 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
         self.c128_size = c128_size
         self.c4_state_pool_size = c4_state_pool_size
         self.c128_state_pool_size = c128_state_pool_size
-        self.state_dtype = state_dtype
+        self.c4_state_dtype = c4_state_dtype
+        self.c128_state_dtype = c128_state_dtype
         self.compression_ratios = compression_ratios
 
         # Determine this PP stage's absolute layer range
@@ -591,7 +593,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
                 ring_size=ring_size,
                 overlap=overlap,
                 head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
-                dtype=self.state_dtype,
+                dtype=self.c4_state_dtype if ratio == 4 else self.c128_state_dtype,
                 device=self.device,
                 enable_memory_saver=enable_memory_saver,
                 ratio=ratio,
@@ -606,7 +608,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
                     overlap=overlap,
                     head_dim=self.indexer_head_dim,
                     device=self.device,
-                    dtype=self.state_dtype,
+                    dtype=self.c4_state_dtype,
                     enable_memory_saver=enable_memory_saver,
                     ratio=ratio,
                     swa_page_size=self.swa_page_size,
