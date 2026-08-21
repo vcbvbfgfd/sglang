@@ -65,6 +65,54 @@ This section explains how to configure the request tracing and export the trace 
 
     **Note**: You must set the parameter `--enable-trace`; otherwise, the trace capability will not be enabled regardless of any dynamic adjustments to the trace level.
 
+## OpenAI Request Observability
+
+The `/v1/chat/completions` entrypoint creates a request-level
+`sglang_chat_completion` server span. The span starts before generation, ends after
+the response is assembled, and injects its context into SGLang's tokenizer and
+scheduler trace. With `--enable-trace`, the API span is therefore the parent of the
+internal request, prefill, and decode spans instead of a separate trace.
+
+The span reports request and sampling configuration, prompt/completion/reasoning
+token usage, KV cache hit and miss tokens, device/host/storage cache breakdown,
+TTFT, TPOT, end-to-end and scheduler latency, request ID, weight version, DP rank,
+finish reasons, retractions, and speculative decoding acceptance statistics when
+those values are available.
+
+Configure the request trace and metrics exporters with standard OTLP variables:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_METRICS_PROTOCOL=grpc
+```
+
+The metrics export interval defaults to 30 seconds. It can be overridden with
+`SGLANG_OTEL_METRICS_EXPORT_INTERVAL_MILLIS` or `OTEL_METRIC_EXPORT_INTERVAL`.
+
+KV cache metrics include `sglang.kv_cache.lookup_tokens`,
+`sglang.kv_cache.hit_tokens`, `sglang.kv_cache.miss_tokens`, and
+`sglang.kv_cache.request_hit_ratio`. Compute an aggregate hit ratio by dividing
+the rate of hit-token counters by the rate of lookup-token counters; do not average
+per-request ratios because prompt lengths differ.
+
+Speculative decoding metrics include `sglang.speculative.accept_ratio`, accepted
+and proposed draft-token counters, and verification-call counters. For an
+aggregate acceptance ratio, divide accepted draft-token rate by proposed
+draft-token rate.
+
+Prompt and completion content is excluded by default. Enable it only when the
+deployment's privacy policy allows it:
+
+```bash
+export SGLANG_OTEL_TRACE_CONTENT=true
+```
+
+Scheduler queue and phase metadata requires `--enable-metrics`; core request,
+token, KV cache, and streaming timing attributes remain available without it.
+The internal SGLang request root span also carries KV cache source breakdown,
+retractions, DP rank, and speculative decoding statistics for non-OpenAI paths.
+
 ## How to add Tracing for slices you're interested in?(API introduction)
 We have already inserted instrumentation points in the tokenizer and scheduler main threads. If you wish to trace additional request execution segments or perform finer-grained tracing, please use the APIs from the tracing package as described below.
 

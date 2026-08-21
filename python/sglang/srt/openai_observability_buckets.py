@@ -50,6 +50,20 @@ _GEN_AI_SERVER_TIME_TO_FIRST_TOKEN_BUCKETS = [
     10.0,
 ]
 
+_GEN_AI_SERVER_KV_CACHE_HIT_RATIO_BUCKETS = [
+    0.0,
+    0.01,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    0.9,
+    0.95,
+    0.99,
+    1.0,
+]
+
 _GEN_AI_CLIENT_TOKEN_USAGE_BUCKETS = [
     1,
     4,
@@ -66,4 +80,3 @@ _GEN_AI_CLIENT_TOKEN_USAGE_BUCKETS = [
     16777216,
     67108864,
 ]
-

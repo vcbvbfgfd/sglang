@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -52,13 +53,14 @@ from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
 from sglang.srt.managers.io_struct import GenerateReqInput
+from sglang.srt.openai_observability import (
+    accumulate_stream_items,
+    collect_request_metrics,
+    otel_provider,
+)
 from sglang.srt.parser.conversation import generate_chat_conv
 from sglang.srt.parser.jinja_template_utils import process_content_for_template_format
 from sglang.srt.parser.reasoning_parser import ReasoningParser
-from sglang.srt.openai_observability import (
-    accumulate_stream_items,
-    otel_provider,
-)
 
 _SSE_DATA_B = b"data: "
 _SSE_NL_B = b"\n\n"
@@ -836,6 +838,7 @@ class OpenAIServingChat(OpenAIServingBase):
         hidden_states = {}
         routed_experts = {}
         cached_tokens_details = {}
+        meta_infos = {}
 
         is_first_token = True
         start_time = time.time()
@@ -843,6 +846,16 @@ class OpenAIServingChat(OpenAIServingBase):
         usage = {}
         complete_response = {"choices": [], "model": "", "usage": None, "error": None}
         stream_started = False
+        stream_error = None
+        observation = otel_provider.start_request(
+            "sglang_chat_completion",
+            raw_request.headers,
+            request,
+            start_time=start_time,
+        )
+        if observation is not None and observation.trace_headers:
+            # Make the tokenizer/scheduler request trace a child of the API span.
+            adapted_request.external_trace_header = observation.trace_headers
         try:
             include_usage, continuous_usage_stats = should_include_usage(
                 request.stream_options,
@@ -853,6 +866,7 @@ class OpenAIServingChat(OpenAIServingBase):
                 adapted_request, raw_request
             ):
                 index = content.get("index", 0)
+                meta_infos[index] = content["meta_info"]
 
                 prompt_tokens[index] = content["meta_info"].get("prompt_tokens", 0)
                 completion_tokens[index] = content["meta_info"].get(
@@ -883,7 +897,7 @@ class OpenAIServingChat(OpenAIServingBase):
 
                 finish_reason = content["meta_info"].get("finish_reason", None)
                 finish_reason_type = finish_reason["type"] if finish_reason else None
-                if is_first_token:
+                if is_first_token and completion_tokens[index] > 0:
                     time_of_first_token = time.time()
                     is_first_token = False
 
@@ -903,6 +917,9 @@ class OpenAIServingChat(OpenAIServingBase):
                             finish_reason.get("message", "Generation aborted."),
                             code.name,
                             code.value,
+                        )
+                        stream_error = RuntimeError(
+                            finish_reason.get("message", "Generation aborted.")
                         )
                         yield f"data: {error}\n\n"
                         break
@@ -977,11 +994,14 @@ class OpenAIServingChat(OpenAIServingBase):
                     if finish_reason_type is not None and index in parser_dict:
                         parser = parser_dict[index]
                         remaining_chunk = self._check_for_unstreamed_tool_args(
-                            parser, content, request, index, complete_response,
+                            parser,
+                            content,
+                            request,
+                            index,
+                            complete_response,
                         )
                         if remaining_chunk:
                             yield remaining_chunk
-
 
                 else:
                     # Regular content
@@ -1098,24 +1118,75 @@ class OpenAIServingChat(OpenAIServingBase):
                 accumulate_stream_items(usage_chunk, complete_response)
                 yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
-            otel_provider.record(
+            request_metrics = collect_request_metrics(meta_infos.values())
+            if stream_error is not None:
+                otel_provider.recordException(
+                    "sglang_chat_completion",
+                    raw_request.headers,
+                    request,
+                    stream_error,
+                    observation=observation,
+                    start_time=start_time,
+                    request_metrics=request_metrics,
+                )
+            else:
+                otel_provider.record(
+                    "sglang_chat_completion",
+                    raw_request.headers,
+                    request,
+                    complete_response,
+                    usage,
+                    start_time,
+                    time_of_first_token=time_of_first_token,
+                    stream=True,
+                    observation=observation,
+                    request_metrics=request_metrics,
+                )
+        except ValueError as e:
+            request_metrics = (
+                collect_request_metrics(meta_infos.values()) if meta_infos else None
+            )
+            otel_provider.recordException(
                 "sglang_chat_completion",
                 raw_request.headers,
                 request,
-                complete_response,
-                usage,
-                start_time,
-                time_of_first_token=time_of_first_token,
-                stream=True,
-            )
-        except ValueError as e:
-            otel_provider.recordException(
-                "sglang_chat_completion", raw_request.headers, request, e
+                e,
+                observation=observation,
+                start_time=start_time,
+                request_metrics=request_metrics,
             )
             if not stream_started:
                 raise
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
+        except asyncio.CancelledError as e:
+            otel_provider.recordException(
+                "sglang_chat_completion",
+                raw_request.headers,
+                request,
+                e,
+                observation=observation,
+                start_time=start_time,
+                request_metrics=(
+                    collect_request_metrics(meta_infos.values()) if meta_infos else None
+                ),
+            )
+            raise
+        except Exception as e:
+            otel_provider.recordException(
+                "sglang_chat_completion",
+                raw_request.headers,
+                request,
+                e,
+                observation=observation,
+                start_time=start_time,
+                request_metrics=(
+                    collect_request_metrics(meta_infos.values()) if meta_infos else None
+                ),
+            )
+            raise
+        finally:
+            otel_provider.close_unfinished(observation)
 
         yield "data: [DONE]\n\n"
 
@@ -1127,34 +1198,98 @@ class OpenAIServingChat(OpenAIServingBase):
     ) -> Union[ChatCompletionResponse, ErrorResponse, ORJSONResponse]:
         """Handle non-streaming chat completion request"""
         start_time = time.time()
+        observation = otel_provider.start_request(
+            "sglang_chat_completion",
+            raw_request.headers,
+            request,
+            start_time=start_time,
+        )
+        if observation is not None and observation.trace_headers:
+            adapted_request.external_trace_header = observation.trace_headers
         try:
             ret = await self.tokenizer_manager.generate_request(
                 adapted_request, raw_request
             ).__anext__()
         except ValueError as e:
             otel_provider.recordException(
-                "sglang_chat_completion", raw_request.headers, request, e
+                "sglang_chat_completion",
+                raw_request.headers,
+                request,
+                e,
+                observation=observation,
+                start_time=start_time,
             )
             return self.create_error_response(str(e))
+        except asyncio.CancelledError as e:
+            otel_provider.recordException(
+                "sglang_chat_completion",
+                raw_request.headers,
+                request,
+                e,
+                observation=observation,
+                start_time=start_time,
+            )
+            raise
+        except Exception as e:
+            otel_provider.recordException(
+                "sglang_chat_completion",
+                raw_request.headers,
+                request,
+                e,
+                observation=observation,
+                start_time=start_time,
+            )
+            raise
 
         if not isinstance(ret, list):
             ret = [ret]
 
-        response = self._build_chat_response(
-            request,
-            ret,
-            int(time.time()),
+        request_metrics = collect_request_metrics(
+            ret_item.get("meta_info", {}) for ret_item in ret
         )
-        otel_provider.record(
-            "sglang_chat_completion",
-            raw_request.headers,
-            request,
-            response,
-            response.usage,
-            start_time,
-            stream=False,
-        )
-        return response
+        try:
+            response = self._build_chat_response(
+                request,
+                ret,
+                int(time.time()),
+            )
+            if isinstance(response, ORJSONResponse):
+                otel_provider.recordException(
+                    "sglang_chat_completion",
+                    raw_request.headers,
+                    request,
+                    RuntimeError("chat response construction failed"),
+                    observation=observation,
+                    start_time=start_time,
+                    request_metrics=request_metrics,
+                )
+                return response
+
+            otel_provider.record(
+                "sglang_chat_completion",
+                raw_request.headers,
+                request,
+                response,
+                response.usage,
+                start_time,
+                stream=False,
+                observation=observation,
+                request_metrics=request_metrics,
+            )
+            return response
+        except Exception as e:
+            otel_provider.recordException(
+                "sglang_chat_completion",
+                raw_request.headers,
+                request,
+                e,
+                observation=observation,
+                start_time=start_time,
+                request_metrics=request_metrics,
+            )
+            raise
+        finally:
+            otel_provider.close_unfinished(observation)
 
     def _build_chat_response(
         self,

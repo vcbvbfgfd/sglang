@@ -2704,6 +2704,64 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         span_attrs[SpanAttributes.GEN_AI_USAGE_CACHED_TOKENS] = recv_obj.cached_tokens[
             i
         ]
+        prompt_tokens = recv_obj.prompt_tokens[i]
+        cached_tokens = min(recv_obj.cached_tokens[i], prompt_tokens)
+        span_attrs[SpanAttributes.SGLANG_KV_CACHE_HIT_TOKENS] = cached_tokens
+        span_attrs[SpanAttributes.SGLANG_KV_CACHE_MISS_TOKENS] = max(
+            prompt_tokens - cached_tokens, 0
+        )
+        if prompt_tokens > 0:
+            span_attrs[SpanAttributes.SGLANG_KV_CACHE_HIT_RATIO] = (
+                cached_tokens / prompt_tokens
+            )
+
+        if getattr(recv_obj, "reasoning_tokens", None):
+            span_attrs[SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS] = (
+                recv_obj.reasoning_tokens[i]
+            )
+
+        if getattr(recv_obj, "cached_tokens_details", None):
+            cache_details = recv_obj.cached_tokens_details[i]
+            if cache_details:
+                span_attrs[SpanAttributes.SGLANG_KV_CACHE_DEVICE_HIT_TOKENS] = (
+                    cache_details.get("device", 0)
+                )
+                span_attrs[SpanAttributes.SGLANG_KV_CACHE_HOST_HIT_TOKENS] = (
+                    cache_details.get("host", 0)
+                )
+                span_attrs[SpanAttributes.SGLANG_KV_CACHE_STORAGE_HIT_TOKENS] = (
+                    cache_details.get("storage", 0)
+                )
+                if cache_details.get("storage_backend"):
+                    span_attrs[SpanAttributes.SGLANG_KV_CACHE_STORAGE_BACKEND] = (
+                        cache_details["storage_backend"]
+                    )
+
+        if getattr(recv_obj, "retraction_counts", None):
+            span_attrs[SpanAttributes.SGLANG_REQUEST_RETRACTIONS] = (
+                recv_obj.retraction_counts[i]
+            )
+        if getattr(recv_obj, "dp_ranks", None) and recv_obj.dp_ranks[i] is not None:
+            span_attrs[SpanAttributes.SGLANG_DP_RANK] = recv_obj.dp_ranks[i]
+        if (
+            getattr(recv_obj, "spec_verify_ct", None)
+            and recv_obj.spec_verify_ct[i] > 0
+            and getattr(recv_obj, "spec_num_correct_drafts", None)
+            and len(recv_obj.spec_num_correct_drafts) > i
+        ):
+            verify_count = recv_obj.spec_verify_ct[i]
+            accepted_drafts = recv_obj.spec_num_correct_drafts[i]
+            draft_tokens_per_verify = max(
+                (self.server_args.speculative_num_draft_tokens or 1) - 1, 0
+            )
+            proposed_drafts = verify_count * draft_tokens_per_verify
+            span_attrs[SpanAttributes.SGLANG_SPEC_ACCEPTED_DRAFTS] = accepted_drafts
+            span_attrs[SpanAttributes.SGLANG_SPEC_PROPOSED_DRAFTS] = proposed_drafts
+            if proposed_drafts > 0:
+                span_attrs[SpanAttributes.SGLANG_SPEC_ACCEPT_RATIO] = (
+                    accepted_drafts / proposed_drafts
+                )
+            span_attrs[SpanAttributes.SGLANG_SPEC_VERIFY_COUNT] = verify_count
 
         # Request identifiers
         span_attrs[SpanAttributes.GEN_AI_REQUEST_ID] = (

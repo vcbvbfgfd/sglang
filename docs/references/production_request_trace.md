@@ -67,6 +67,74 @@ This section explains how to configure the request tracing and export the trace 
 
     **Note**: You must set the parameter `--enable-trace`; otherwise, the trace capability will not be enabled regardless of any dynamic adjustments to the trace level.
 
+## OpenAI Request Observability
+
+The `/v1/chat/completions` entrypoint creates a request-level
+`sglang_chat_completion` server span. The span starts before generation, ends after
+the response is assembled, and injects its context into SGLang's tokenizer and
+scheduler trace. With `--enable-trace`, the API span is therefore the parent of the
+internal request, prefill, and decode spans instead of a separate trace.
+
+The request span includes the following groups of attributes when the data is
+available:
+
+- Request configuration: model, streaming mode, maximum output tokens,
+  temperature, top-p/top-k, number of choices, and priority.
+- Token usage: prompt, completion, reasoning, and cached tokens.
+- KV cache: hit/miss tokens, request hit ratio, and device/host/storage hit
+  breakdown. Storage spans also include the storage backend name.
+- Latency: end-to-end, TTFT, generation time, TPOT, scheduler queue time,
+  scheduler prefill time, and backend end-to-end time.
+- Runtime: request ID, weight version, DP rank, decode throughput, scheduler
+  retractions, finish reasons, and speculative decoding acceptance statistics.
+
+OpenAI request metrics use the standard OTLP exporter environment variables. For
+example:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_METRICS_PROTOCOL=grpc
+```
+
+The metrics export interval defaults to 30 seconds. Override it with
+`SGLANG_OTEL_METRICS_EXPORT_INTERVAL_MILLIS` or the standard
+`OTEL_METRIC_EXPORT_INTERVAL` variable.
+
+The request metrics include:
+
+- `gen_ai.chat_completions.streaming_time_to_first_token`
+- `gen_ai.chat_completions.streaming_time_to_generate`
+- `gen_ai.chat_completions.streaming_time_per_output_token`
+- `gen_ai.client.operation.duration` and `gen_ai.client.token.usage`
+- `sglang.kv_cache.lookup_tokens`, `sglang.kv_cache.hit_tokens`,
+  `sglang.kv_cache.miss_tokens`, and `sglang.kv_cache.request_hit_ratio`
+- `sglang.request.queue_duration`, `sglang.request.prefill_duration`,
+  `sglang.request.backend_duration`, and `sglang.request.retractions`
+- `sglang.speculative.accept_ratio`, `sglang.speculative.accepted_draft_tokens`,
+  `sglang.speculative.proposed_draft_tokens`, and
+  `sglang.speculative.verify_calls`
+
+For an aggregate KV cache hit ratio, divide the rate of hit-token counters by the
+rate of lookup-token counters. Do not average the per-request ratio histogram,
+because requests have different prompt lengths.
+
+Likewise, compute an aggregate speculative decoding acceptance ratio by dividing
+the accepted draft-token rate by the proposed draft-token rate.
+
+Prompt and completion content is excluded from spans by default. It can be
+enabled explicitly when the deployment's privacy policy allows it:
+
+```bash
+export SGLANG_OTEL_TRACE_CONTENT=true
+```
+
+Scheduler queue and phase metadata requires `--enable-metrics`; core request,
+token, KV cache, and streaming timing attributes remain available without it.
+The internal SGLang request root span also carries token usage, KV cache
+hit/miss/source breakdown, retractions, DP rank, and speculative decoding
+statistics, so these fields remain available for non-OpenAI generation paths.
+
 ## How to add Tracing for slices you're interested in?(API introduction)
 We have already inserted instrumentation points in the tokenizer and scheduler main threads. If you wish to trace additional request execution segments or perform finer-grained tracing, please use the APIs from the tracing package as described below.
 
